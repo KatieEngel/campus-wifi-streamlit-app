@@ -13,9 +13,59 @@ import streamlit.components.v1 as components
 # Page configuration
 st.set_page_config(
     page_title="Campus Occupancy Heatmap",
-    page_icon="🏢",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    /* Main container styling */
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1200px;
+    }
+    
+    /* Section headers */
+    .section-header {
+        text-align: center;
+        margin: 2rem 0;
+        padding: 1rem;
+        background: linear-gradient(90deg, #f0f2f6, #ffffff);
+        border-radius: 10px;
+        border-left: 4px solid #1f77b4;
+    }
+    
+    /* Metric cards */
+    .metric-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-left: 3px solid #1f77b4;
+    }
+    
+    /* Chart containers */
+    .chart-container {
+        background: white;
+        padding: 1rem;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin: 1rem 0;
+    }
+    
+    /* Sidebar styling */
+    .css-1d391kg {
+        background-color: #f8f9fa;
+    }
+    
+    /* Hide streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
 
 @st.cache_data
 def load_data():
@@ -176,9 +226,9 @@ def create_occupancy_timeline(data, selected_date):
 
 
 def main():
-    st.title("🏢 Campus Occupancy Heatmap - First Day Analysis")
+    st.title("Campus Occupancy Heatmap - First Day Analysis")
     st.markdown("**Interactive heatmap with scroll-over time feature and residential/non-residential color coding**")
-    st.markdown("📅 **Scope**: First day data only (Day 2 handled by Kathleen)")
+    st.markdown("**Scope**: First day data only (Day 2 handled by Kathleen)")
     
     # Load data
     data, campus = load_data()
@@ -250,400 +300,347 @@ def main():
         (data['building_category'].isin(selected_categories))
     ]
     
-    # Main content
-    col1, col2 = st.columns([2, 1])
+    # Main content with better organization
+    st.markdown("---")
     
-    with col1:
-        # Convert to 12-hour format for display
-        if selected_hour == 0:
-            time_display = "12:00 AM"
-        elif selected_hour < 12:
-            time_display = f"{selected_hour}:00 AM"
-        elif selected_hour == 12:
-            time_display = "12:00 PM"
-        else:
-            time_display = f"{selected_hour - 12}:00 PM"
+    # Header section with centered title
+    st.markdown("""
+    <div style="text-align: center; margin-bottom: 2rem;">
+        <h2>Campus Occupancy Visualization</h2>
+        <p style="font-size: 1.1em; color: #666;">Interactive heatmap with real-time occupancy data</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Convert to 12-hour format for display
+    if selected_hour == 0:
+        time_display = "12:00 AM"
+    elif selected_hour < 12:
+        time_display = f"{selected_hour}:00 AM"
+    elif selected_hour == 12:
+        time_display = "12:00 PM"
+    else:
+        time_display = f"{selected_hour - 12}:00 PM"
+    
+    # Time and date display
+    col_time, col_date = st.columns([1, 1])
+    with col_time:
+        st.metric("Selected Time", time_display)
+    with col_date:
+        st.metric("Selected Date", str(selected_date))
+    
+    st.markdown("---")
+    
+    if not filtered_data.empty:
+        # Create heatmap data
+        heatmap_data = create_heatmap_data(data, selected_date, selected_hour)
         
-        st.subheader(f"Geographic Heatmap - {selected_date} at {time_display}")
-        
-        if not filtered_data.empty:
-            # Create heatmap data
-            heatmap_data = create_heatmap_data(data, selected_date, selected_hour)
+        if heatmap_data is not None:
+            # Create geographic map visualization
+            st.markdown("### Interactive Campus Map")
+            st.markdown("*Hover over buildings to see occupancy details*")
             
-            if heatmap_data is not None:
-                # Create geographic map visualization
-                st.subheader("🗺️ Interactive Campus Map")
+            # Prepare data for mapping
+            map_data = data[
+                (data['hour'] == selected_hour) &
+                (data['building_category'].isin(selected_categories))
+            ].copy()
+            
+            if not map_data.empty:
+                # Aggregate by building for map
+                building_map_data = map_data.groupby(['building_id', 'building_category']).agg({
+                    'occupancy': 'sum'
+                }).reset_index()
                 
-                # Prepare data for mapping
-                map_data = data[
-                    (data['hour'] == selected_hour) &
-                    (data['building_category'].isin(selected_categories))
-                ].copy()
+                # Add building names
+                if 'BLDG_NAME' in data.columns:
+                    building_map_data = building_map_data.merge(
+                        data[['building_id', 'BLDG_NAME']].drop_duplicates(),
+                        on='building_id',
+                        how='left'
+                    )
+                    name_col = 'BLDG_NAME'
+                else:
+                    name_col = 'building_id'
                 
-                if not map_data.empty:
-                    # Aggregate by building for map
-                    building_map_data = map_data.groupby(['building_id', 'building_category']).agg({
-                        'occupancy': 'sum'
-                    }).reset_index()
+                # Create building shape heatmap using Folium
+                try:
+                    import folium
+                    from streamlit_folium import st_folium
+                    import geopandas as gpd
                     
-                    # Add building names
-                    if 'BLDG_NAME' in data.columns:
-                        building_map_data = building_map_data.merge(
-                            data[['building_id', 'BLDG_NAME']].drop_duplicates(),
+                    # Get unique buildings with geometry and occupancy
+                    building_geo = data[['building_id', 'geometry', 'building_category', 'BLDG_NAME']].drop_duplicates()
+                    building_geo = building_geo[building_geo['geometry'].notna()]
+                    
+                    if not building_geo.empty:
+                        # Merge with occupancy data
+                        building_geo = building_geo.merge(
+                            building_map_data[['building_id', 'occupancy']],
                             on='building_id',
                             how='left'
                         )
-                        name_col = 'BLDG_NAME'
-                    else:
-                        name_col = 'building_id'
-                    
-                    # Create building shape heatmap using Folium
-                    try:
-                        import folium
-                        from streamlit_folium import st_folium
-                        import geopandas as gpd
                         
-                        # Get unique buildings with geometry and occupancy
-                        building_geo = data[['building_id', 'geometry', 'building_category', 'BLDG_NAME']].drop_duplicates()
-                        building_geo = building_geo[building_geo['geometry'].notna()]
+                        # Convert to GeoDataFrame and ensure proper coordinate system
+                        gdf = gpd.GeoDataFrame(building_geo, geometry='geometry', crs="EPSG:4326")
                         
-                        if not building_geo.empty:
-                            # Merge with occupancy data
-                            building_geo = building_geo.merge(
-                                building_map_data[['building_id', 'occupancy']],
-                                on='building_id',
-                                how='left'
-                            )
-                            
-                            # Convert to GeoDataFrame and ensure proper coordinate system
-                            gdf = gpd.GeoDataFrame(building_geo, geometry='geometry', crs="EPSG:4326")
-                            
-                            # Ensure geometries are valid and properly aligned
-                            gdf = gdf.to_crs("EPSG:4326")  # Ensure WGS84 coordinate system
-                            gdf = gdf[gdf.geometry.is_valid]  # Remove invalid geometries
-                            
-                            # Check if we have valid geometry
-                            valid_geometry = gdf[gdf['geometry'].notna()]
-                            if len(valid_geometry) == 0:
-                                st.error("No valid geometry data found!")
-                                raise Exception("No valid geometry data")
-                            
-                            # Debug: Check geometry bounds to ensure they're in the right location
-                            bounds = gdf.total_bounds
-                            st.info(f"Building geometry bounds: {bounds}")
-                            st.info(f"Expected campus location: [33.7756, -84.3963]")
-                            
-                            # Debug: Check occupancy data for color intensity
-                            occupancy_stats = gdf['occupancy'].describe()
-                            st.info(f"Occupancy statistics: {occupancy_stats}")
-                            st.info(f"Max occupancy: {gdf['occupancy'].max()}")
-                            st.info(f"Min occupancy: {gdf['occupancy'].min()}")
-                            
-                            # Show sample buildings with their colors
-                            sample_buildings = gdf[['building_id', 'BLDG_NAME', 'building_category', 'occupancy']].head(5)
-                            st.info(f"Sample buildings: {sample_buildings}")
-                            
-                            # Create Folium map with simple, clean tiles
-                            m = folium.Map(
-                                location=[33.7756, -84.3963], 
-                                zoom_start=16, 
-                                tiles=None  # Start with no base tiles
-                            )
-                            
-                            # Add simple, minimal tile layer
-                            folium.TileLayer(
-                                tiles='https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png',
-                                attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-                                name='Simple Map',
-                                overlay=False,
-                                control=False
-                            ).add_to(m)
-                            
-                            # NEW COLOR CALCULATION: Higher occupancy = Darker colors
-                            def get_building_color(feature):
-                                """Get color based on building type and occupancy intensity - HIGHER OCCUPANCY = DARKER COLOR"""
-                                try:
-                                    props = feature['properties']
-                                    building_id = props.get('building_id', 'unknown')
-                                    building_category = props.get('building_category', 'Unknown')
-                                    occupancy = props.get('occupancy', 0)
-                                    
-                                    # Handle None or invalid occupancy values
-                                    if occupancy is None or pd.isna(occupancy):
-                                        occupancy = 0
-                                    
-                                    # Get occupancy statistics for this time period
-                                    min_occupancy = gdf['occupancy'].min()
-                                    max_occupancy = gdf['occupancy'].max()
-                                    
-                                    # Calculate normalized occupancy (0 to 1)
-                                    if max_occupancy > min_occupancy:
-                                        normalized_occupancy = (occupancy - min_occupancy) / (max_occupancy - min_occupancy)
-                                    else:
-                                        normalized_occupancy = 0
-                                    
-                                    # Define base colors (light versions for low occupancy)
-                                    light_colors = {
-                                        'Residential': '#FFB3B3',    # Light red
-                                        'Non-Residential': '#B3E5E5', # Light teal  
-                                        'Unknown': '#D3D3D3'         # Light gray
-                                    }
-                                    
-                                    # Define dark colors (dark versions for high occupancy)
-                                    dark_colors = {
-                                        'Residential': '#CC0000',    # Dark red
-                                        'Non-Residential': '#006666', # Dark teal
-                                        'Unknown': '#666666'         # Dark gray
-                                    }
-                                    
-                                    # Get light and dark colors for this building type
-                                    light_color = light_colors.get(building_category, '#D3D3D3')
-                                    dark_color = dark_colors.get(building_category, '#666666')
-                                    
-                                    # Interpolate between light and dark based on occupancy
-                                    # normalized_occupancy = 0 → light color
-                                    # normalized_occupancy = 1 → dark color
-                                    
-                                    # Convert hex to RGB
-                                    def hex_to_rgb(hex_color):
-                                        hex_color = hex_color.lstrip('#')
-                                        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-                                    
-                                    def rgb_to_hex(rgb):
-                                        return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-                                    
-                                    light_rgb = hex_to_rgb(light_color)
-                                    dark_rgb = hex_to_rgb(dark_color)
-                                    
-                                    # Interpolate between light and dark
-                                    interpolated_rgb = tuple(
-                                        int(light_rgb[i] + (dark_rgb[i] - light_rgb[i]) * normalized_occupancy)
-                                        for i in range(3)
-                                    )
-                                    
-                                    final_color = rgb_to_hex(interpolated_rgb)
-                                    
-                                    # Debug for John Lewis
-                                    if 'john' in str(building_id).lower() or 'lewis' in str(building_id).lower():
-                                        st.info(f"DEBUG - Building: {building_id}")
-                                        st.info(f"DEBUG - Occupancy: {occupancy}, Min: {min_occupancy}, Max: {max_occupancy}")
-                                        st.info(f"DEBUG - Normalized: {normalized_occupancy:.3f}")
-                                        st.info(f"DEBUG - Light color: {light_color}, Dark color: {dark_color}")
-                                        st.info(f"DEBUG - Final color: {final_color}")
-                                    
-                                    return final_color
-                                    
-                                except Exception as e:
-                                    st.error(f"Color calculation error: {e}")
-                                    return '#D3D3D3'  # Light gray default
-                            
-                            # Create style function - eliminate shadows from building geometries
-                            def style_function(feature):
-                                return {
-                                    'fillColor': get_building_color(feature),
-                                    'color': 'transparent',
-                                    'weight': 0,
-                                    'fillOpacity': 0.9,
-                                    'stroke': False,  # No stroke to prevent shadows
-                                    'shadow': False,  # Explicitly disable shadows
-                                }
-                            
-                            # Create popup function
-                            def popup_function(feature):
+                        # Ensure geometries are valid and properly aligned
+                        gdf = gdf.to_crs("EPSG:4326")  # Ensure WGS84 coordinate system
+                        gdf = gdf[gdf.geometry.is_valid]  # Remove invalid geometries
+                        
+                        # Check if we have valid geometry
+                        valid_geometry = gdf[gdf['geometry'].notna()]
+                        if len(valid_geometry) == 0:
+                            st.error("No valid geometry data found!")
+                            raise Exception("No valid geometry data")
+                        
+                        # Create Folium map with simple, clean tiles
+                        m = folium.Map(
+                            location=[33.7756, -84.3963], 
+                            zoom_start=16, 
+                            tiles=None  # Start with no base tiles
+                        )
+                        
+                        # Add simple, minimal tile layer
+                        folium.TileLayer(
+                            tiles='https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png',
+                            attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                            name='Simple Map',
+                            overlay=False,
+                            control=False
+                        ).add_to(m)
+                        
+                        # NEW COLOR CALCULATION: Higher occupancy = Darker colors
+                        def get_building_color(feature):
+                            """Get color based on building type and occupancy intensity - HIGHER OCCUPANCY = DARKER COLOR"""
+                            try:
                                 props = feature['properties']
-                                building_name = props.get('BLDG_NAME', props.get('building_id', 'Unknown'))
-                                # Convert to 12-hour format with AM/PM
-                                if selected_hour == 0:
-                                    time_display = "12:00 AM"
-                                elif selected_hour < 12:
-                                    time_display = f"{selected_hour}:00 AM"
-                                elif selected_hour == 12:
-                                    time_display = "12:00 PM"
-                                else:
-                                    time_display = f"{selected_hour - 12}:00 PM"
-                                
-                                return f"""
-                                <b>Building: {building_name}</b><br>
-                                ID: {props.get('building_id', 'Unknown')}<br>
-                                Category: {props.get('building_category', 'Unknown')}<br>
-                                Occupancy: {props.get('occupancy', 0)}<br>
-                                Time: {time_display}
-                                """
-                            
-                            # Create tooltip function
-                            def tooltip_function(feature):
-                                props = feature['properties']
-                                building_name = props.get('BLDG_NAME', props.get('building_id', 'Unknown'))
-                                category = props.get('building_category', 'Unknown')
+                                building_id = props.get('building_id', 'unknown')
+                                building_category = props.get('building_category', 'Unknown')
                                 occupancy = props.get('occupancy', 0)
                                 
-                                # Convert to 12-hour format with AM/PM
-                                if selected_hour == 0:
-                                    time_display = "12:00 AM"
-                                elif selected_hour < 12:
-                                    time_display = f"{selected_hour}:00 AM"
-                                elif selected_hour == 12:
-                                    time_display = "12:00 PM"
-                                else:
-                                    time_display = f"{selected_hour - 12}:00 PM"
+                                # Handle None or invalid occupancy values
+                                if occupancy is None or pd.isna(occupancy):
+                                    occupancy = 0
                                 
-                                return f"""
-                                <b>{building_name}</b><br>
-                                Category: {category}<br>
-                                Occupancy: {occupancy}<br>
-                                Time: {time_display}
-                                """
-                            
-                            # Add GeoJson to map - completely flat, no popups
-                            folium.GeoJson(
-                                gdf,
-                                style_function=style_function
-                            ).add_to(m)
-                            
-                            # Add individual markers with proper tooltips for hover functionality
-                            for _, row in gdf.iterrows():
-                                if row.geometry is not None:
-                                    try:
-                                        # Get building info
-                                        building_name = row.get('BLDG_NAME', row.get('building_id', 'Unknown'))
-                                        category = row.get('building_category', 'Unknown')
-                                        occupancy = row.get('occupancy', 0)
-                                        
-                                        # Convert to 12-hour format with AM/PM
-                                        if selected_hour == 0:
-                                            time_display = "12:00 AM"
-                                        elif selected_hour < 12:
-                                            time_display = f"{selected_hour}:00 AM"
-                                        elif selected_hour == 12:
-                                            time_display = "12:00 PM"
-                                        else:
-                                            time_display = f"{selected_hour - 12}:00 PM"
-                                        
-                                        # Create tooltip content
-                                        tooltip_text = f"""
-                                        <b>{building_name}</b><br>
-                                        Category: {category}<br>
-                                        Occupancy: {occupancy}<br>
-                                        Time: {time_display}
-                                        """
-                                        
-                                        # Add marker at building centroid
-                                        folium.Marker(
-                                            location=[row.geometry.centroid.y, row.geometry.centroid.x],
-                                            tooltip=folium.Tooltip(
-                                                tooltip_text,
-                                                style="""
-                                                font-family: Arial, sans-serif;
-                                                font-size: 12px;
-                                                background-color: white;
-                                                border: 1px solid #ccc;
-                                                border-radius: 5px;
-                                                padding: 5px;
-                                                box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-                                                """
-                                            ),
-                                            icon=folium.Icon(
-                                                color='red' if category == 'Residential' else 'blue',
-                                                icon='building',
-                                                icon_size=(10, 10)
-                                            )
-                                        ).add_to(m)
-                                    except Exception as e:
-                                        pass  # Skip buildings with errors
-                            
-                            # Display the map using HTML embedding to avoid component conflicts
-                            map_html = m._repr_html_()
-                            st.components.v1.html(map_html, width=1000, height=700)
-                            
-                            # Add detailed legend with color intensity examples
-                            st.markdown("**Color Intensity Legend:**")
-                            
-                            # Show actual occupancy range
-                            max_occ = gdf['occupancy'].max()
-                            min_occ = gdf['occupancy'].min()
-                            
-                            st.markdown(f"**Occupancy Range:** {min_occ} to {max_occ} devices")
-                            
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.markdown("🔴 **Residential Buildings**")
-                                st.markdown("- Light Red = Low Occupancy")
-                                st.markdown("- Dark Red = High Occupancy")
-                            with col2:
-                                st.markdown("🔵 **Non-Residential Buildings**")
-                                st.markdown("- Light Teal = Low Occupancy") 
-                                st.markdown("- Dark Teal = High Occupancy")
-                            with col3:
-                                st.markdown("⚫ **Unknown Buildings**")
-                                st.markdown("- Light Gray = Low Occupancy")
-                                st.markdown("- Dark Gray = High Occupancy")
-                            
-                            # Show intensity calculation
-                            st.markdown("**Intensity Formula:**")
-                            st.markdown(f"- Lightest: 30% intensity (occupancy = {min_occ})")
-                            st.markdown(f"- Darkest: 100% intensity (occupancy = {max_occ})")
-                            st.markdown("- **Darker colors = More occupants**")
-                            
-                            # Add occupancy intensity explanation
-                            st.markdown("**Color Intensity System:**")
-                            st.markdown("- **Light colors** = Low occupancy (30% intensity)")
-                            st.markdown("- **Dark colors** = High occupancy (100% intensity)")
-                            st.markdown("- **Building type** = Color (Red=Residential, Teal=Non-Residential)")
-                            st.markdown("- **Occupancy level** = Intensity (Light=Low, Dark=High)")
-                            
-                        else:
-                            raise Exception("No geometry data available")
-                            
-                    except Exception as e:
-                        # Fallback to regular scatter plot if geographic mapping fails
+                                # Get occupancy statistics for this time period
+                                min_occupancy = gdf['occupancy'].min()
+                                max_occupancy = gdf['occupancy'].max()
+                                
+                                # Calculate normalized occupancy (0 to 1)
+                                if max_occupancy > min_occupancy:
+                                    normalized_occupancy = (occupancy - min_occupancy) / (max_occupancy - min_occupancy)
+                                else:
+                                    normalized_occupancy = 0
+                                
+                                # Define base colors (light versions for low occupancy)
+                                light_colors = {
+                                    'Residential': '#FFB3B3',    # Light red
+                                    'Non-Residential': '#B3E5E5', # Light teal  
+                                    'Unknown': '#D3D3D3'         # Light gray
+                                }
+                                
+                                # Define dark colors (dark versions for high occupancy)
+                                dark_colors = {
+                                    'Residential': '#CC0000',    # Dark red
+                                    'Non-Residential': '#006666', # Dark teal
+                                    'Unknown': '#666666'         # Dark gray
+                                }
+                                
+                                # Get light and dark colors for this building type
+                                light_color = light_colors.get(building_category, '#D3D3D3')
+                                dark_color = dark_colors.get(building_category, '#666666')
+                                
+                                # Interpolate between light and dark based on occupancy
+                                # normalized_occupancy = 0 → light color
+                                # normalized_occupancy = 1 → dark color
+                                
+                                # Convert hex to RGB
+                                def hex_to_rgb(hex_color):
+                                    hex_color = hex_color.lstrip('#')
+                                    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+                                
+                                def rgb_to_hex(rgb):
+                                    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+                                
+                                light_rgb = hex_to_rgb(light_color)
+                                dark_rgb = hex_to_rgb(dark_color)
+                                
+                                # Interpolate between light and dark
+                                interpolated_rgb = tuple(
+                                    int(light_rgb[i] + (dark_rgb[i] - light_rgb[i]) * normalized_occupancy)
+                                    for i in range(3)
+                                )
+                                
+                                final_color = rgb_to_hex(interpolated_rgb)
+                                
+                                return final_color
+                                
+                            except Exception as e:
+                                st.error(f"Color calculation error: {e}")
+                                return '#D3D3D3'  # Light gray default
                         
-                        # Create color mapping
-                        color_map = {
-                            'Residential': '#FF6B6B',  # Red for residential
-                            'Non-Residential': '#4ECDC4',  # Teal for non-residential
-                            'Unknown': '#95A5A6'  # Gray for unknown
-                        }
+                        # Create style function - eliminate shadows from building geometries
+                        def style_function(feature):
+                            return {
+                                'fillColor': get_building_color(feature),
+                                'color': 'transparent',
+                                'weight': 0,
+                                'fillOpacity': 0.9,
+                                'stroke': False,  # No stroke to prevent shadows
+                                'shadow': False,  # Explicitly disable shadows
+                            }
                         
-                        # Create scatter plot
-                        fig_map = px.scatter(
-                            building_map_data,
-                            x='building_id',
-                            y='occupancy',
-                            color='building_category',
-                            size='occupancy',
-                            hover_data=[name_col] if name_col != 'building_id' else [],
-                            color_discrete_map=color_map,
-                            title=f"Building Occupancy - {selected_hour:02d}:00",
-                            height=500
-                        )
+                        # Add GeoJson to map - completely flat, no popups
+                        folium.GeoJson(
+                            gdf,
+                            style_function=style_function
+                        ).add_to(m)
                         
-                        fig_map.update_layout(
-                            xaxis_title="Building ID",
-                            yaxis_title="Occupancy Count",
-                            legend_title="Building Category",
-                            showlegend=True
-                        )
+                        # Add individual markers with proper tooltips for hover functionality
+                        for _, row in gdf.iterrows():
+                            if row.geometry is not None:
+                                try:
+                                    # Get building info
+                                    building_name = row.get('BLDG_NAME', row.get('building_id', 'Unknown'))
+                                    category = row.get('building_category', 'Unknown')
+                                    occupancy = row.get('occupancy', 0)
+                                    
+                                    # Convert to 12-hour format with AM/PM
+                                    if selected_hour == 0:
+                                        time_display = "12:00 AM"
+                                    elif selected_hour < 12:
+                                        time_display = f"{selected_hour}:00 AM"
+                                    elif selected_hour == 12:
+                                        time_display = "12:00 PM"
+                                    else:
+                                        time_display = f"{selected_hour - 12}:00 PM"
+                                    
+                                    # Create tooltip content
+                                    tooltip_text = f"""
+                                    <b>{building_name}</b><br>
+                                    Category: {category}<br>
+                                    Occupancy: {occupancy}<br>
+                                    Time: {time_display}
+                                    """
+                                    
+                                    # Add marker at building centroid
+                                    folium.Marker(
+                                        location=[row.geometry.centroid.y, row.geometry.centroid.x],
+                                        tooltip=folium.Tooltip(
+                                            tooltip_text,
+                                            style="""
+                                            font-family: Arial, sans-serif;
+                                            font-size: 12px;
+                                            background-color: white;
+                                            border: 1px solid #ccc;
+                                            border-radius: 5px;
+                                            padding: 5px;
+                                            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+                                            """
+                                        ),
+                                        icon=folium.Icon(
+                                            color='red' if category == 'Residential' else 'blue',
+                                            icon='building',
+                                            icon_size=(10, 10)
+                                        )
+                                    ).add_to(m)
+                                except Exception as e:
+                                    pass  # Skip buildings with errors
                         
-                        st.plotly_chart(fig_map, use_container_width=True)
+                        # Display the map using HTML embedding to avoid component conflicts
+                        map_html = m._repr_html_()
+                        st.components.v1.html(map_html, width=1000, height=700)
+                        
+                        # Add detailed legend with color intensity examples
+                        st.markdown("**Color Intensity Legend:**")
+                        
+                        # Show actual occupancy range
+                        max_occ = gdf['occupancy'].max()
+                        min_occ = gdf['occupancy'].min()
+                        
+                        st.markdown(f"**Occupancy Range:** {min_occ} to {max_occ} devices")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.markdown("**Residential Buildings**")
+                            st.markdown("- Light Red = Low Occupancy")
+                            st.markdown("- Dark Red = High Occupancy")
+                        with col2:
+                            st.markdown("**Non-Residential Buildings**")
+                            st.markdown("- Light Teal = Low Occupancy") 
+                            st.markdown("- Dark Teal = High Occupancy")
+                        with col3:
+                            st.markdown("**Unknown Buildings**")
+                            st.markdown("- Light Gray = Low Occupancy")
+                            st.markdown("- Dark Gray = High Occupancy")
+                        
+                        # Show intensity calculation
+                        st.markdown("**Intensity Formula:**")
+                        st.markdown(f"- Lightest: 30% intensity (occupancy = {min_occ})")
+                        st.markdown(f"- Darkest: 100% intensity (occupancy = {max_occ})")
+                        st.markdown("- **Darker colors = More occupants**")
+                        
+                        # Add occupancy intensity explanation
+                        st.markdown("**Color Intensity System:**")
+                        st.markdown("- **Light colors** = Low occupancy (30% intensity)")
+                        st.markdown("- **Dark colors** = High occupancy (100% intensity)")
+                        st.markdown("- **Building type** = Color (Red=Residential, Teal=Non-Residential)")
+                        st.markdown("- **Occupancy level** = Intensity (Light=Low, Dark=High)")
+                        
+                    else:
+                        raise Exception("No geometry data available")
+                        
+                except Exception as e:
+                    # Fallback to regular scatter plot if geographic mapping fails
+                    st.warning(f"Geographic mapping failed: {e}")
+                    st.info("Showing data in chart format instead")
                     
-                    # Add building details table
-                    st.subheader("📍 Building Details")
-                    building_details = building_map_data.sort_values('occupancy', ascending=False)
-                    display_cols = ['building_id', name_col, 'building_category', 'occupancy']
-                    if 'lat' in building_details.columns:
-                        display_cols.extend(['lat', 'lon'])
+                    # Create color mapping
+                    color_map = {
+                        'Residential': '#FF6B6B',  # Red for residential
+                        'Non-Residential': '#4ECDC4',  # Teal for non-residential
+                        'Unknown': '#95A5A6'  # Gray for unknown
+                    }
                     
-                    st.dataframe(
-                        building_details[display_cols].rename(
-                            columns={name_col: 'Building Name', 'occupancy': 'Occupancy'}
-                        ),
-                        use_container_width=True
+                    # Create scatter plot
+                    fig_map = px.scatter(
+                        building_map_data,
+                        x='building_id',
+                        y='occupancy',
+                        color='building_category',
+                        size='occupancy',
+                        hover_data=[name_col] if name_col != 'building_id' else [],
+                        color_discrete_map=color_map,
+                        title=f"Building Occupancy - {time_display}",
+                        height=500
                     )
-                else:
-                    st.warning("No data available for the selected time and filters")
+                    
+                    fig_map.update_layout(
+                        xaxis_title="Building ID",
+                        yaxis_title="Occupancy Count",
+                        legend_title="Building Category",
+                        showlegend=True
+                    )
+                    
+                    st.plotly_chart(fig_map, use_container_width=True)
                 
-                # Also show bar chart for detailed analysis
-                st.subheader("📊 Building Occupancy Chart")
+                # Add building details table
+                st.subheader("Building Details")
+                building_details = building_map_data.sort_values('occupancy', ascending=False)
+                display_cols = ['building_id', name_col, 'building_category', 'occupancy']
+                if 'lat' in building_details.columns:
+                    display_cols.extend(['lat', 'lon'])
+                
+                st.dataframe(
+                    building_details[display_cols].rename(
+                        columns={name_col: 'Building Name', 'occupancy': 'Occupancy'}
+                    ),
+                    use_container_width=True
+                )
+                
+                # Building occupancy chart section
+                st.markdown("---")
+                st.markdown("### Building Occupancy Analysis")
                 
                 # Create color mapping for building categories
                 color_map = {
@@ -659,7 +656,7 @@ def main():
                     y='occupancy',
                     color='building_category',
                     color_discrete_map=color_map,
-                    title=f"Building Occupancy at {selected_hour:02d}:00",
+                    title=f"Building Occupancy at {time_display}",
                     labels={'occupancy': 'Occupancy Count', 'building_name': 'Building'},
                     height=400
                 )
@@ -667,22 +664,32 @@ def main():
                 fig.update_layout(
                     xaxis_tickangle=-45,
                     showlegend=True,
-                    legend_title="Building Category"
+                    legend_title="Building Category",
+                    title_x=0.5,  # Center the title
+                    font=dict(size=12)
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.warning("No data available for the selected time")
+                st.warning("No data available for the selected time and filters")
         else:
-            st.warning("No data available for the selected filters")
+            st.warning("No data available for the selected time")
+    else:
+        st.warning("No data available for the selected filters")
     
-    with col2:
-        st.subheader("Timeline Analysis")
+    # Timeline Analysis Section - Full width and centered
+    st.markdown("---")
+    st.markdown("### Timeline Analysis")
+    st.markdown("*Track occupancy patterns throughout the day*")
+    
+    # Create timeline for the selected date
+    timeline_data = create_occupancy_timeline(data, selected_date)
+    
+    if timeline_data is not None:
+        # Create two columns for timeline and stats
+        col_timeline, col_stats = st.columns([2, 1])
         
-        # Create timeline for the selected date
-        timeline_data = create_occupancy_timeline(data, selected_date)
-        
-        if timeline_data is not None:
+        with col_timeline:
             # Create timeline chart
             fig_timeline = px.line(
                 timeline_data,
@@ -691,7 +698,7 @@ def main():
                 color='building_category',
                 title="Hourly Occupancy Pattern",
                 labels={'hour': 'Hour of Day', 'occupancy': 'Total Occupancy'},
-                height=300
+                height=400
             )
             
             # Add vertical line for selected hour
@@ -699,13 +706,28 @@ def main():
                 x=selected_hour,
                 line_dash="dash",
                 line_color="red",
-                annotation_text=f"Selected: {selected_hour:02d}:00"
+                annotation_text=f"Selected: {time_display}"
+            )
+            
+            # Center the title and improve styling
+            fig_timeline.update_layout(
+                title_x=0.5,
+                font=dict(size=12),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
             )
             
             st.plotly_chart(fig_timeline, use_container_width=True)
+        
+        with col_stats:
+            st.markdown("#### Current Hour Statistics")
             
             # Summary statistics
-            st.subheader("Summary Statistics")
             total_occupancy = timeline_data[timeline_data['hour'] == selected_hour]['occupancy'].sum()
             st.metric("Total Occupancy", f"{total_occupancy:,}")
             
@@ -713,57 +735,94 @@ def main():
             category_breakdown = timeline_data[timeline_data['hour'] == selected_hour].groupby('building_category')['occupancy'].sum()
             for category, occupancy in category_breakdown.items():
                 st.metric(f"{category} Occupancy", f"{occupancy:,}")
+            
+            # Add trend indicator
+            if selected_hour > 0:
+                prev_hour_data = timeline_data[timeline_data['hour'] == selected_hour - 1]
+                if not prev_hour_data.empty:
+                    prev_total = prev_hour_data['occupancy'].sum()
+                    change = total_occupancy - prev_total
+                    change_pct = (change / prev_total * 100) if prev_total > 0 else 0
+                    
+                    st.metric("Change from Previous Hour", f"{change:+,}", f"{change_pct:+.1f}%")
     
-    # Additional analysis section
-    st.subheader("📊 Detailed Analysis")
+    # Detailed Analysis Section
+    st.markdown("---")
+    st.markdown("### Detailed Analysis")
+    st.markdown("*Comprehensive data breakdown and trends*")
     
     # Show raw data for selected time
     if not filtered_data.empty:
-        st.subheader("Raw Data for Selected Time")
+        # Create tabs for different analysis views
+        tab1, tab2, tab3 = st.tabs(["Summary Table", "Trends", "Raw Data"])
         
-        # Display summary table - use available columns
-        available_cols = filtered_data.columns.tolist()
-        group_cols = ['building_category']
-        
-        # Add building name if available
-        if 'building_name' in available_cols:
-            group_cols.append('building_name')
-        elif 'BLDG_NAME' in available_cols:
-            group_cols.append('BLDG_NAME')
-        else:
-            group_cols.append('building_id')
-        
-        summary_data = filtered_data.groupby(group_cols).agg({
-            'occupancy': ['sum', 'mean', 'count']
-        }).round(2)
-        
-        summary_data.columns = ['Total Occupancy', 'Average Occupancy', 'Data Points']
-        st.dataframe(summary_data, use_container_width=True)
-        
-        # Show trends
-        st.subheader("Occupancy Trends")
-        
-        # Compare with previous hour
-        if selected_hour > 0:
-            prev_hour_data = data[
-                (data['date'] == selected_date) & 
-                (data['hour'] == selected_hour - 1) &
-                (data['building_category'].isin(selected_categories))
-            ]
+        with tab1:
+            st.markdown("#### Building Occupancy Summary")
             
-            if not prev_hour_data.empty:
-                current_total = filtered_data['occupancy'].sum()
-                prev_total = prev_hour_data['occupancy'].sum()
-                change = current_total - prev_total
-                change_pct = (change / prev_total * 100) if prev_total > 0 else 0
+            # Display summary table - use available columns
+            available_cols = filtered_data.columns.tolist()
+            group_cols = ['building_category']
+            
+            # Add building name if available
+            if 'building_name' in available_cols:
+                group_cols.append('building_name')
+            elif 'BLDG_NAME' in available_cols:
+                group_cols.append('BLDG_NAME')
+            else:
+                group_cols.append('building_id')
+            
+            summary_data = filtered_data.groupby(group_cols).agg({
+                'occupancy': ['sum', 'mean', 'count']
+            }).round(2)
+            
+            summary_data.columns = ['Total Occupancy', 'Average Occupancy', 'Data Points']
+            st.dataframe(summary_data, use_container_width=True)
+        
+        with tab2:
+            st.markdown("#### Occupancy Trends")
+            
+            # Compare with previous hour
+            if selected_hour > 0:
+                prev_hour_data = data[
+                    (data['date'] == selected_date) & 
+                    (data['hour'] == selected_hour - 1) &
+                    (data['building_category'].isin(selected_categories))
+                ]
                 
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Current Hour", f"{current_total:,}")
-                with col2:
-                    st.metric("Previous Hour", f"{prev_total:,}")
-                with col3:
-                    st.metric("Change", f"{change:+,}", f"{change_pct:+.1f}%")
+                if not prev_hour_data.empty:
+                    current_total = filtered_data['occupancy'].sum()
+                    prev_total = prev_hour_data['occupancy'].sum()
+                    change = current_total - prev_total
+                    change_pct = (change / prev_total * 100) if prev_total > 0 else 0
+                    
+                    # Create metrics in a centered layout
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Current Hour", f"{current_total:,}")
+                    with col2:
+                        st.metric("Previous Hour", f"{prev_total:,}")
+                    with col3:
+                        st.metric("Change", f"{change:+,}", f"{change_pct:+.1f}%")
+                else:
+                    st.info("No previous hour data available for comparison")
+            else:
+                st.info("This is the first hour of data - no previous hour to compare")
+        
+        with tab3:
+            st.markdown("#### Raw Data Sample")
+            st.markdown("*Showing first 100 rows of filtered data*")
+            
+            # Show sample of raw data
+            sample_data = filtered_data.head(100)
+            display_cols = ['building_id', 'building_category', 'occupancy', 'hour']
+            if 'BLDG_NAME' in sample_data.columns:
+                display_cols.insert(1, 'BLDG_NAME')
+            
+            st.dataframe(
+                sample_data[display_cols],
+                use_container_width=True,
+                height=400
+            )
     
     # Footer
     st.markdown("---")
