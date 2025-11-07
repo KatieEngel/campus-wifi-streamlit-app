@@ -133,11 +133,11 @@ def create_occupancy_timeline(data, selected_date):
     
     # Aggregate by hour and building category for the line chart
     # We sum the 'occupancy' which is the pre-calculated unique user count
-    hourly_data = daily_data.groupby(['hour', 'building_category']).agg({
+    timeline_data = daily_data.groupby(['time_bin', 'building_category']).agg({
         'occupancy': 'sum'
     }).reset_index()
     
-    return hourly_data
+    return timeline_data
 
 
 def main():
@@ -364,20 +364,33 @@ def main():
     if timeline_data is not None:
         fig_timeline = px.line(
             timeline_data,
-            x='hour',
+            x='time_bin',
             y='occupancy',
             color='building_category',
             title=f"Total Hourly Occupancy Pattern on {selected_date}",
             labels={'hour': 'Hour of Day', 'occupancy': 'Total Unique Users'},
             height=400
         )
+
+        selected_timestamp = pd.to_datetime(f"{selected_date} {selected_hour}:{selected_minute:02d}")
         
-        # Add vertical line for selected hour
-        fig_timeline.add_vline(
-            x=selected_hour,
-            line_dash="dash",
-            line_color="red",
-            annotation_text=f"Selected Hour: {selected_hour}:00"
+        fig_timeline.add_shape(
+            type='line',
+            x0=selected_timestamp,
+            x1=selected_timestamp,
+            y0=0,
+            y1=1,
+            yref='paper',  # 'paper' means span the full height of the plot
+            line=dict(color='red', dash='dash')
+        )
+
+        fig_timeline.add_annotation(
+            x=selected_timestamp,
+            y=1.05,       # Position it just above the top of the plot
+            yref='paper', # Use 'paper' to reference the plot area
+            text=f"Selected: {time_display}",
+            showarrow=False,
+            font=dict(color="red")
         )
         st.plotly_chart(fig_timeline, width='stretch')
 

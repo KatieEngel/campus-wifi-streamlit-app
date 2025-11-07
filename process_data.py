@@ -38,12 +38,12 @@ def create_summary_file_10min():
     # --- 4. Aggregate Unique Users ---
     print("Aggregating unique users (this is the slow part)...")
     
-    # --- THIS IS THE OTHER KEY CHANGE ---
+    # -- Change to Username instead of MAC address
     # Group by the new 'time_bin' instead of date and hour
-    occupancy_data = wifi.groupby(['time_bin', 'bid_no_letters', 'building_id'])['MAC'].nunique().reset_index()
+    occupancy_data = wifi.groupby(['time_bin', 'bid_no_letters', 'building_id'])['Username'].nunique().reset_index()
     
     # Rename for clarity
-    occupancy_data.rename(columns={'MAC': 'occupancy', 'bid_no_letters': 'BLDG_CODE'}, inplace=True)
+    occupancy_data.rename(columns={'Username': 'occupancy', 'bid_no_letters': 'BLDG_CODE'}, inplace=True)
 
     # --- 5. Merge Building & Geometry Info ---
     print("Merging building info...")
@@ -76,7 +76,7 @@ def create_summary_file_10min():
     print(f"Success! App summary file saved to: {output_parquet}")
 
     # B) Save the CSV file for your other task
-    output_csv = 'ten_min_occupancy_summary.csv'
+    output_csv = 'notebooks/data/ten_min_occupancy_summary.csv'
     occupancy_data.to_csv(output_csv, index=False)
     print(f"Success! CSV summary file saved to: {output_csv}")
 
