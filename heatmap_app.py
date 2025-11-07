@@ -140,6 +140,59 @@ def create_occupancy_timeline(data, selected_date):
     return hourly_data
 
 
+def create_campus_timeseries(data, interval_minutes: int = 10):
+    """Create a campus-wide time series of unique users.
+
+    This helper supports two input shapes:
+    - Pre-aggregated 10-minute summary (has 'time_bin' and 'occupancy') -> simply sums occupancy across buildings per time_bin.
+    - Raw connection-level data with a 'time' column and device ids ('MAC' or 'IP') -> resamples into interval_minutes and counts unique devices.
+
+    Returns a DataFrame with columns: ['time_bin', 'unique_users'].
+    """
+    if data is None or data.empty:
+        return None
+
+    df = data.copy()
+
+    # Case 1: pre-aggregated 10-minute bins already exist
+    if 'time_bin' in df.columns and 'occupancy' in df.columns:
+        # Ensure datetime
+        df['time_bin'] = pd.to_datetime(df['time_bin'])
+        ts = df.groupby('time_bin', as_index=False)['occupancy'].sum()
+        ts = ts.rename(columns={'occupancy': 'unique_users'})
+        return ts[['time_bin', 'unique_users']]
+
+    # Case 2: raw connection-level data
+    if 'time' not in df.columns:
+        st.error("Data missing both 'time_bin'/'occupancy' and raw 'time' columns; cannot build time series.")
+        return None
+
+    df['time'] = pd.to_datetime(df['time'])
+    df = df.sort_values('time')
+
+    # Choose identifier column for uniqueness
+    id_col = None
+    if 'MAC' in df.columns:
+        id_col = 'MAC'
+    elif 'IP' in df.columns:
+        id_col = 'IP'
+
+    # Set time as index for resampling
+    df = df.set_index('time')
+
+    # If we have an identifier, compute unique counts per resample bin
+    if id_col is not None:
+        ts = df[id_col].resample(f"{interval_minutes}T").nunique()
+    else:
+        # Fallback: count rows per bin
+        ts = df.resample(f"{interval_minutes}T").size()
+
+    ts = ts.rename('unique_users').to_frame().reset_index()
+    ts['time_bin'] = ts['time']
+
+    return ts[['time_bin', 'unique_users']]
+
+
 def main():
     st.title("Campus Occupancy Heatmap")
     st.markdown("**Interactive heatmap showing unique device counts in 10-minute intervals.**")
@@ -185,6 +238,74 @@ def main():
         building_categories,
         default=building_categories
     )
+
+    # Appearance controls: color palette, normalization, smoothing
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Appearance")
+    palette_option = st.sidebar.selectbox(
+        "Color Palette",
+        options=[
+            'Residential/Non-Residential (red/teal)',
+            'Colorblind-friendly (Set1)',
+            'Viridis',
+            'High Contrast'
+        ],
+        index=0
+    )
+
+    normalization = st.sidebar.selectbox(
+        "Color normalization",
+        options=['min-max', '95th-percentile'],
+        index=0,
+        help="Choose how occupancy values are scaled into color intensity"
+    )
+
+    smoothing_bins = st.sidebar.slider(
+        "Timeseries smoothing (number of 10-min bins)",
+        min_value=1,
+        max_value=12,
+        value=6,
+        help="Rolling window for smoothing the 10-minute timeseries (default ~60 minutes)"
+    )
+
+    # Helper to get category color mapping
+    def get_palette_mapping(name):
+        if name == 'Colorblind-friendly (Set1)':
+            return {
+                'Residential': '#e41a1c',
+                'Non-Residential': '#377eb8',
+                'Unknown': '#4daf4a'
+            }
+        if name == 'Viridis':
+            return {
+                'Residential': '#440154',
+                'Non-Residential': '#21918c',
+                'Unknown': '#fde725'
+            }
+        if name == 'High Contrast':
+            return {
+                'Residential': '#d62728',
+                'Non-Residential': '#1f77b4',
+                'Unknown': '#ff7f0e'
+            }
+        # default
+        return {
+            'Residential': 'red',
+            'Non-Residential': 'teal',
+            'Unknown': 'gray'
+        }
+
+    category_colors = get_palette_mapping(palette_option)
+    # small helper to convert hex to "r, g, b" string for CSS rgba usage
+    def hex_to_rgb_str(h):
+        h = h.lstrip('#')
+        try:
+            r = int(h[0:2], 16)
+            g = int(h[2:4], 16)
+            b = int(h[4:6], 16)
+            return f"{r}, {g}, {b}"
+        except:
+            return "128, 128, 128"
 
     # --- Main content ---
     
@@ -234,20 +355,18 @@ def main():
             # We use the full day's data so the legend is consistent
             full_day_data = data[data['date'] == pd.to_datetime(selected_date).date()]
             min_occ = full_day_data['occupancy'].min()
-            max_occ = full_day_data['occupancy'].max()
+            if normalization == '95th-percentile':
+                max_occ = float(np.percentile(full_day_data['occupancy'].dropna(), 95))
+            else:
+                max_occ = full_day_data['occupancy'].max()
 
             # --- 2. Define an advanced style_function ---
             def style_function(feature):
                 category = feature['properties']['building_category']
                 occupancy = feature['properties']['occupancy']
                 
-                # Set color by category
-                colors = {
-                    'Residential': 'red',
-                    'Non-Residential': 'teal',
-                    'Unknown': 'gray'
-                }
-                color = colors.get(category, 'gray')
+                # Set color by category using palette selection
+                color = category_colors.get(category, 'gray')
 
                 # Set opacity (shade) by occupancy
                 if max_occ > min_occ:
@@ -300,8 +419,9 @@ def main():
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.markdown("**Residential**")
+                rbg = hex_to_rgb_str(category_colors.get('Residential', '#ff0000'))
                 st.markdown(f"""
-                <div style="background: linear-gradient(to right, rgba(255, 0, 0, 0.3), rgba(255, 0, 0, 0.9)); border-radius: 5px; height: 20px; width: 100%;"></div>
+                <div style="background: linear-gradient(to right, rgba({rbg}, 0.3), rgba({rbg}, 0.95)); border-radius: 5px; height: 20px; width: 100%;"></div>
                 <div style="display: flex; justify-content: space-between; font-size: 12px;">
                     <span>Low ({min_occ})</span>
                     <span>High ({max_occ})</span>
@@ -310,8 +430,9 @@ def main():
             
             with col2:
                 st.markdown("**Non-Residential**")
+                rgb = hex_to_rgb_str(category_colors.get('Non-Residential', '#008080'))
                 st.markdown(f"""
-                <div style="background: linear-gradient(to right, rgba(0, 128, 128, 0.3), rgba(0, 128, 128, 0.9)); border-radius: 5px; height: 20px; width: 100%;"></div>
+                <div style="background: linear-gradient(to right, rgba({rgb}, 0.3), rgba({rgb}, 0.95)); border-radius: 5px; height: 20px; width: 100%;"></div>
                 <div style="display: flex; justify-content: space-between; font-size: 12px;">
                     <span>Low ({min_occ})</span>
                     <span>High ({max_occ})</span>
@@ -320,8 +441,9 @@ def main():
 
             with col3:
                 st.markdown("**Unknown**")
+                rgb_u = hex_to_rgb_str(category_colors.get('Unknown', '#808080'))
                 st.markdown(f"""
-                <div style="background: linear-gradient(to right, rgba(128, 128, 128, 0.3), rgba(128, 128, 128, 0.9)); border-radius: 5px; height: 20px; width: 100%;"></div>
+                <div style="background: linear-gradient(to right, rgba({rgb_u}, 0.3), rgba({rgb_u}, 0.95)); border-radius: 5px; height: 20px; width: 100%;"></div>
                 <div style="display: flex; justify-content: space-between; font-size: 12px;">
                     <span>Low ({min_occ})</span>
                     <span>High ({max_occ})</span>
@@ -337,11 +459,7 @@ def main():
                 x='BLDG_NAME',
                 y='occupancy',
                 color='building_category',
-                color_discrete_map={
-                    'Residential': 'red',
-                    'Non-Residential': 'teal',
-                    'Unknown': 'gray'
-                },
+                color_discrete_map=category_colors,
                 title=f"Building Occupancy at {time_display}",
                 labels={'occupancy': 'Unique User Count', 'BLDG_NAME': 'Building'},
                 height=400
@@ -376,10 +494,48 @@ def main():
         fig_timeline.add_vline(
             x=selected_hour,
             line_dash="dash",
-            line_color="red",
+            line_color=category_colors.get('Residential', '#d62728'),
             annotation_text=f"Selected Hour: {selected_hour}:00"
         )
         st.plotly_chart(fig_timeline, width='stretch')
+        # --- Campus-wide 10-minute unique-user time series and simple smoothing ---
+        ts_10min = create_campus_timeseries(data, interval_minutes=10)
+        if ts_10min is not None and not ts_10min.empty:
+            ts = ts_10min.copy()
+            ts = ts.sort_values('time_bin')
+            # Add a rolling mean for smoothing (smoothing_bins * 10 minutes)
+            ts['smoothed'] = ts['unique_users'].rolling(window=smoothing_bins, min_periods=1, center=True).mean()
+            smoothing_minutes = smoothing_bins * 10
+
+            fig_ts = go.Figure()
+            raw_color = '#666666'
+            smoothed_color = category_colors.get('Residential', '#d62728')
+            fig_ts.add_trace(go.Scatter(
+                x=ts['time_bin'],
+                y=ts['unique_users'],
+                mode='lines',
+                name='Unique users (10-min bins)',
+                line=dict(color=raw_color, width=1),
+                hovertemplate='%{x}<br>Unique users: %{y}<extra></extra>'
+            ))
+            fig_ts.add_trace(go.Scatter(
+                x=ts['time_bin'],
+                y=ts['smoothed'],
+                mode='lines',
+                name=f'Smoothed (rolling {smoothing_minutes} min)',
+                line=dict(color=smoothed_color, width=2)
+            ))
+
+            fig_ts.update_layout(
+                title=f'Campus-wide Unique Users — 10-minute bins on {selected_date}',
+                xaxis_title='Time',
+                yaxis_title='Unique Users',
+                height=350,
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+            )
+
+            st.markdown("#### Campus-wide 10-minute Unique Users")
+            st.plotly_chart(fig_ts, use_container_width=True)
 
     # --- Raw Data View ---
     if st.checkbox("Show Raw Aggregated Data (for this time)"):
