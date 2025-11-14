@@ -11,6 +11,7 @@ import requests
 import streamlit.components.v1 as components
 import folium
 from streamlit_folium import st_folium
+import branca.colormap as cm
 
 # Page configuration
 st.set_page_config(
@@ -94,6 +95,26 @@ def load_data():
             building_data = json.load(f)
         campus = gpd.GeoDataFrame.from_features(building_data['features'], crs="EPSG:4326")
 
+        # --- THIS IS THE FIX ---
+        # We must create the 'building_category' column for the base 'campus' map,
+        # just like we did in process_data.py.
+        
+        def classify_building_type(bldg_type):
+            if pd.isna(bldg_type): return 'Unknown'
+            bldg_type_lower = str(bldg_type).lower()
+            if any(keyword in bldg_type_lower for keyword in ['residence', 'dormitory', 'housing', 'greek']):
+                return 'Residential'
+            else:
+                return 'Non-Residential'
+        
+        # Your geojson has 'BLDG_TYPE', which we use to create the new column
+        if 'BLDG_TYPE' in campus.columns:
+            campus['building_category'] = campus['BLDG_TYPE'].apply(classify_building_type)
+        else:
+            st.error("Error: The GeoJSON file is missing the 'BLDG_TYPE' column, so categories cannot be created.")
+            return None, None
+        # --- END OF FIX ---
+
         return data, campus
         
     except Exception as e:
@@ -133,64 +154,11 @@ def create_occupancy_timeline(data, selected_date):
     
     # Aggregate by hour and building category for the line chart
     # We sum the 'occupancy' which is the pre-calculated unique user count
-    hourly_data = daily_data.groupby(['hour', 'building_category']).agg({
+    timeline_data = daily_data.groupby(['time_bin', 'building_category']).agg({
         'occupancy': 'sum'
     }).reset_index()
     
-    return hourly_data
-
-
-def create_campus_timeseries(data, interval_minutes: int = 10):
-    """Create a campus-wide time series of unique users.
-
-    This helper supports two input shapes:
-    - Pre-aggregated 10-minute summary (has 'time_bin' and 'occupancy') -> simply sums occupancy across buildings per time_bin.
-    - Raw connection-level data with a 'time' column and device ids ('MAC' or 'IP') -> resamples into interval_minutes and counts unique devices.
-
-    Returns a DataFrame with columns: ['time_bin', 'unique_users'].
-    """
-    if data is None or data.empty:
-        return None
-
-    df = data.copy()
-
-    # Case 1: pre-aggregated 10-minute bins already exist
-    if 'time_bin' in df.columns and 'occupancy' in df.columns:
-        # Ensure datetime
-        df['time_bin'] = pd.to_datetime(df['time_bin'])
-        ts = df.groupby('time_bin', as_index=False)['occupancy'].sum()
-        ts = ts.rename(columns={'occupancy': 'unique_users'})
-        return ts[['time_bin', 'unique_users']]
-
-    # Case 2: raw connection-level data
-    if 'time' not in df.columns:
-        st.error("Data missing both 'time_bin'/'occupancy' and raw 'time' columns; cannot build time series.")
-        return None
-
-    df['time'] = pd.to_datetime(df['time'])
-    df = df.sort_values('time')
-
-    # Choose identifier column for uniqueness
-    id_col = None
-    if 'MAC' in df.columns:
-        id_col = 'MAC'
-    elif 'IP' in df.columns:
-        id_col = 'IP'
-
-    # Set time as index for resampling
-    df = df.set_index('time')
-
-    # If we have an identifier, compute unique counts per resample bin
-    if id_col is not None:
-        ts = df[id_col].resample(f"{interval_minutes}T").nunique()
-    else:
-        # Fallback: count rows per bin
-        ts = df.resample(f"{interval_minutes}T").size()
-
-    ts = ts.rename('unique_users').to_frame().reset_index()
-    ts['time_bin'] = ts['time']
-
-    return ts[['time_bin', 'unique_users']]
+    return timeline_data
 
 
 def main():
@@ -199,9 +167,9 @@ def main():
     
     # Load data
     data, campus = load_data()
-    
-    if data is None or data.empty:
-        st.error("Failed to load data.")
+
+    if data is None or campus is None or data.empty or campus.empty:
+        st.error("Failed to load data. Please check file paths and run process_data.py.")
         return
     
     # Sidebar controls
@@ -215,21 +183,31 @@ def main():
         index=0
     )
     
-    # Hour selection
-    selected_hour = st.sidebar.slider(
-        "Select Hour (24-hr)",
-        min_value=0, 
-        max_value=23, 
-        value=14, # Default to 2 PM
-        format="%d:00"
+    # === NEW TIME SLIDER ===
+    
+    # 1. Generate all 10-minute intervals for the selected day
+    start_time = pd.to_datetime(selected_date)
+    end_time = start_time + pd.Timedelta(days=1)
+    
+    # Creates a list of timestamps: [00:00, 00:10, ..., 23:50]
+    time_intervals = pd.date_range(start=start_time, end=end_time, freq='10T', inclusive='left')
+    
+    # 2. Set a default value
+    default_timestamp = pd.to_datetime(f"{selected_date} 12:00")
+    
+    # 3. Create the single select_slider
+    selected_timestamp = st.sidebar.select_slider(
+        "Select Time",
+        options=time_intervals,
+        value=default_timestamp,
+        format_func=lambda ts: ts.strftime('%H:%M')  # Show as 24-hr time
     )
     
-    # Minute selection
-    selected_minute = st.sidebar.select_slider(
-        "Select Minute",
-        options=[0, 10, 20, 30, 40, 50],
-        value=0
-    )
+    # 4. Extract the hour and minute for the rest of the app
+    selected_hour = selected_timestamp.hour
+    selected_minute = selected_timestamp.minute
+    
+    # === END OF NEW TIME SLIDER ===
     
     # Building category filter
     building_categories = data['building_category'].unique()
@@ -310,10 +288,7 @@ def main():
     # --- Main content ---
     
     # Convert selected time to 12-hour format for display
-    hour_12 = selected_hour % 12
-    if hour_12 == 0: hour_12 = 12 # 0 and 12 should be 12
-    am_pm = "AM" if selected_hour < 12 else "PM"
-    time_display = f"{hour_12}:{selected_minute:02d} {am_pm}"
+    time_display = selected_timestamp.strftime('%I:%M %p')
     
     # Time and date display
     col_time, col_date = st.columns([1, 1])
@@ -325,74 +300,141 @@ def main():
     st.markdown("---")
     
     # Get the filtered data for the selected time
+    # A) Filter the base campus map by selected categories
+    #    This is the complete list of buildings we want to show.
+    campus_filtered = campus[campus['building_category'].isin(selected_categories)].copy()
+
+    # B) --- NEW LOGIC: GET SEPARATE MAX VALUES ---
+    # Get all data for the day, NOT filtered by selected categories
+    full_day_data = data[(data['date'] == pd.to_datetime(selected_date).date())]
+    min_occ = 0 # Min is always 0
+
+    # Calculate max for Residential
+    max_res = full_day_data[full_day_data['building_category'] == 'Residential']['occupancy'].max()
+    if pd.isna(max_res) or max_res == 0: max_res = 1
+
+    # Calculate max for Non-Residential
+    max_non_res = full_day_data[full_day_data['building_category'] == 'Non-Residential']['occupancy'].max()
+    if pd.isna(max_non_res) or max_non_res == 0: max_non_res = 1
+    
+    # Calculate max for Unknown
+    max_unk = full_day_data[full_day_data['building_category'] == 'Unknown']['occupancy'].max()
+    if pd.isna(max_unk) or max_unk == 0: max_unk = 1
+    # --- END NEW LOGIC ---
+
+    # C) Get the (sparse) occupancy data for the specific 10-min interval
     heatmap_data = create_heatmap_data(data, selected_date, selected_hour, selected_minute)
-    
-    # Filter by category
+
+    # D) Merge the (sparse) heatmap data onto our (complete) filtered campus
+    #    This brings the occupancy data (or lack of it) to every building.
     if heatmap_data is not None:
-        heatmap_data = heatmap_data[heatmap_data['building_category'].isin(selected_categories)]
+        gdf = campus_filtered.merge(
+            heatmap_data[['BLDG_CODE', 'occupancy']], 
+            on='BLDG_CODE', 
+            how='left'
+        )
+    else:
+        # If no data for this time, create gdf from campus_filtered directly
+        gdf = campus_filtered.copy()
+        gdf['occupancy'] = 0 # Set occupancy to 0 for all
     
-    if heatmap_data is not None and not heatmap_data.empty:
-        # --- Create geographic map visualization ---
+    # E) Fill missing occupancy with 0
+    #    Any building not in heatmap_data had 0 occupancy at this time.
+    gdf['occupancy'] = gdf['occupancy'].fillna(0).astype(int)
+
+    # === 4. MAP VISUALIZATION (NEW LOGIC) ===
+    
+   # === 4. MAP VISUALIZATION (NEW LOGIC) ===
+    
+    # --- A) Define the 6-step Colors ---
+    RES_COLORS = ['#FFEDF0', '#FFC9D4', '#FF9FAD', '#FF6384', '#DC143C', '#8B0000']
+    NON_RES_COLORS = ['#F1F7FF', '#D6E6FF', '#B0D0FF', '#7FB5FF', '#4292C6', '#08519C']
+    UNK_COLORS = ['#FAFAFA', '#E0E0E0', '#BDBDBD', '#9E9E9E', '#616161', '#212121']
+    
+    # --- B) Helper function to create 6 steps for *any* max_val ---
+    def get_6_steps(max_val):
+        max_val = max(min_occ + 5, max_val) # Ensure max is at least 6 (for 6 bins)
+        # Create 7 break points (to get 6 bins)
+        breaks = np.linspace(min_occ, max_val, 7).astype(int)
+        step_index = breaks[:-1].tolist() # [b0, b1, b2, b3, b4, b5]
+        
+        legend_ranges = []
+        for i in range(6):
+            start = breaks[i]
+            end = breaks[i+1]
+            # For the last bin, make it inclusive. For others, [start - (end-1)]
+            if i == 5:
+                range_str = f"{start}+"
+            else:
+                range_str = f"{start} - {end - 1}"
+            legend_ranges.append(range_str)
+            
+        # Handle edge case where breaks are not unique (if max_val is small)
+        # e.g., [0, 0, 1, 2, 3, 4] -> [0, 1, 2, 3, 4, 5]
+        if len(set(step_index)) < 6:
+            step_index = [0, 1, 2, 3, 4, 5]
+            legend_ranges = ["0", "1", "2", "3", "4", "5+"]
+
+        return step_index, legend_ranges
+
+    # --- C) Create the 3 SEPARATE colormaps and legends ---
+    step_index_res, ranges_res = get_6_steps(max_res)
+    res_map = cm.StepColormap(
+        colors=RES_COLORS, index=step_index_res, vmin=min_occ, vmax=max_res
+    )
+    
+    step_index_non_res, ranges_non_res = get_6_steps(max_non_res)
+    non_res_map = cm.StepColormap(
+        colors=NON_RES_COLORS, index=step_index_non_res, vmin=min_occ, vmax=max_non_res
+    )
+    
+    step_index_unk, ranges_unk = get_6_steps(max_unk)
+    unk_map = cm.StepColormap(
+        colors=UNK_COLORS, index=step_index_unk, vmin=min_occ, vmax=max_unk
+    )
+    
+    if not gdf.empty:
         st.markdown("### Interactive Campus Map")
         st.markdown("*Hover over buildings to see occupancy details*")
         
         try:
-            # Get valid geometry
-            gdf = heatmap_data[heatmap_data.geometry.is_valid & heatmap_data.geometry.notna()]
+            gdf_valid = gdf[gdf.geometry.is_valid & gdf.geometry.notna()]
             
-            if gdf.empty:
+            if gdf_valid.empty:
                 st.error("No valid building geometry found for this time.")
                 return
 
-            # Create the base map
-            m = folium.Map(
-                location=[33.7756, -84.3963], 
-                zoom_start=15, 
-                tiles="CartoDB positron"
-            )
+            m = folium.Map(location=[33.7756, -84.3963], zoom_start=15, tiles="CartoDB positron")
 
-            # --- 1. Get occupancy range for a STABLE color scale ---
-            # We use the full day's data so the legend is consistent
-            full_day_data = data[data['date'] == pd.to_datetime(selected_date).date()]
-            min_occ = full_day_data['occupancy'].min()
-            if normalization == '95th-percentile':
-                max_occ = float(np.percentile(full_day_data['occupancy'].dropna(), 95))
-            else:
-                max_occ = full_day_data['occupancy'].max()
-
-            # --- 2. Define an advanced style_function ---
+            # --- D) Define the style_function (This is now using the StepColormap) ---
             def style_function(feature):
-                category = feature['properties']['building_category']
-                occupancy = feature['properties']['occupancy']
-                
-                # Set color by category using palette selection
-                color = category_colors.get(category, 'gray')
+                try:
+                    occupancy = float(feature['properties']['occupancy'])
+                    category = feature['properties']['building_category']
+                    
+                    if category == 'Residential':
+                        fill_color = res_map(occupancy)
+                    elif category == 'Non-Residential':
+                        fill_color = non_res_map(occupancy)
+                    else:
+                        fill_color = unk_map(occupancy)
+                        
+                    return {
+                        'fillColor': fill_color,
+                        'color': 'black',
+                        'weight': 0.5,
+                        'fillOpacity': 0.85, # Constant opacity
+                    }
+                except Exception:
+                    return {'fillColor': 'purple', 'fillOpacity': 0.5} # Error color
 
-                # Set opacity (shade) by occupancy
-                if max_occ > min_occ:
-                    # Normalize occupancy from 0 (min) to 1 (max)
-                    norm_occupancy = (occupancy - min_occ) / (max_occ - min_occ)
-                else:
-                    norm_occupancy = 0
-                
-                # Map occupancy to opacity (e.g., 0.3 for low, 0.9 for high)
-                opacity = 0.3 + (norm_occupancy * 0.6)
-                
-                return {
-                    'fillColor': color,
-                    'color': 'black',      # A thin black border
-                    'weight': 0.5,
-                    'fillOpacity': opacity, # Opacity is now based on occupancy
-                }
-
-            # --- 3. Create a clean tooltip GeoDataFrame ---
+            # --- E) Create tooltip and GeoJson layer (no change) ---
             tooltip_cols = ['BLDG_NAME', 'building_category', 'occupancy']
-            gdf_for_map = gdf[tooltip_cols + ['geometry']].copy()
+            gdf_for_map = gdf_valid[tooltip_cols + ['geometry']].copy() 
             gdf_for_map['time_display'] = time_display
             tooltip_cols.append('time_display')
             tooltip_aliases = ['Building', 'Category', 'Occupancy', 'Time']
 
-            # --- 4. Create the single GeoJson layer ---
             folium.GeoJson(
                 gdf_for_map,
                 style_function=style_function,
@@ -411,136 +453,120 @@ def main():
                 )
             ).add_to(m)
 
-            # --- 5. Display the map ---
             st_folium(m, width=1000, height=700)
             
-            # --- 6. ADD A CUSTOM HTML LEGEND (Placed below the map) ---
+            # --- F) NEW LEGEND (Uses the 3 separate range lists) ---
             st.markdown("#### Map Legend")
+            
+            # This helper function is the same as before
+            def create_step_legend(colors, value_ranges):
+                html = "<div style='font-size: 12px; line-height: 1.6;'>"
+                for color, text in zip(colors, value_ranges):
+                    line = f'<div style="display: flex; align-items: center; margin-bottom: 3px;"><div style="width: 20px; height: 20px; background-color: {color}; border: 1px solid #444; margin-right: 8px; flex-shrink: 0;"></div><span>{text}</span></div>'
+                    html += line
+                html += "</div>"
+                return html
+
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.markdown("**Residential**")
-                rbg = hex_to_rgb_str(category_colors.get('Residential', '#ff0000'))
-                st.markdown(f"""
-                <div style="background: linear-gradient(to right, rgba({rbg}, 0.3), rgba({rbg}, 0.95)); border-radius: 5px; height: 20px; width: 100%;"></div>
-                <div style="display: flex; justify-content: space-between; font-size: 12px;">
-                    <span>Low ({min_occ})</span>
-                    <span>High ({max_occ})</span>
-                </div>
-                """, unsafe_allow_html=True)
+                # Use the residential colors and ranges
+                st.markdown(create_step_legend(RES_COLORS, ranges_res), unsafe_allow_html=True)
             
             with col2:
                 st.markdown("**Non-Residential**")
-                rgb = hex_to_rgb_str(category_colors.get('Non-Residential', '#008080'))
-                st.markdown(f"""
-                <div style="background: linear-gradient(to right, rgba({rgb}, 0.3), rgba({rgb}, 0.95)); border-radius: 5px; height: 20px; width: 100%;"></div>
-                <div style="display: flex; justify-content: space-between; font-size: 12px;">
-                    <span>Low ({min_occ})</span>
-                    <span>High ({max_occ})</span>
-                </div>
-                """, unsafe_allow_html=True)
+                # Use the non-residential colors and ranges
+                st.markdown(create_step_legend(NON_RES_COLORS, ranges_non_res), unsafe_allow_html=True)
 
             with col3:
                 st.markdown("**Unknown**")
-                rgb_u = hex_to_rgb_str(category_colors.get('Unknown', '#808080'))
-                st.markdown(f"""
-                <div style="background: linear-gradient(to right, rgba({rgb_u}, 0.3), rgba({rgb_u}, 0.95)); border-radius: 5px; height: 20px; width: 100%;"></div>
-                <div style="display: flex; justify-content: space-between; font-size: 12px;">
-                    <span>Low ({min_occ})</span>
-                    <span>High ({max_occ})</span>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # --- END OF NEW CODE ---
-            
+                # Use the unknown colors and ranges
+                st.markdown(create_step_legend(UNK_COLORS, ranges_unk), unsafe_allow_html=True)
+                
             # --- Bar Chart ---
             st.markdown("### Building Occupancy Analysis")
-            fig = px.bar(
-                heatmap_data.sort_values('occupancy', ascending=False),
-                x='BLDG_NAME',
-                y='occupancy',
-                color='building_category',
-                color_discrete_map=category_colors,
-                title=f"Building Occupancy at {time_display}",
-                labels={'occupancy': 'Unique User Count', 'BLDG_NAME': 'Building'},
-                height=400
-            )
-            st.plotly_chart(fig, width='stretch')
+            bar_data = gdf[gdf['occupancy'] > 0].sort_values('occupancy', ascending=False)
+            
+            if not bar_data.empty:
+                fig = px.bar(
+                    bar_data,
+                    x='BLDG_NAME',
+                    y='occupancy',
+                    color='building_category',
+                    color_discrete_map={ 
+                        'Residential': '#DC143C', # Crimson (from new ramp)
+                        'Non-Residential': '#4292C6', # Mid-Blue (from new ramp)
+                        'Unknown': '#737373'      # Mid-Gray (from new ramp)
+                    },
+                    title=f"Building Occupancy at {time_display}",
+                    labels={'occupancy': 'Unique User Count', 'BLDG_NAME': 'Building'},
+                    height=400
+                )
+                st.plotly_chart(fig, width='stretch')
+            else:
+                st.info("No building occupancy (greater than 0) to display in bar chart.")
 
         except Exception as e:
             st.error(f"An error occurred while creating the map: {e}")
+            st.exception(e)
 
     else:
-        st.warning(f"No data available for {time_display} on {selected_date} with the selected filters.")
+        st.warning(f"No building categories selected. Please select one or more categories from the sidebar.")
     
     # --- Timeline Analysis Section ---
     st.markdown("---")
     st.markdown("### Hourly Timeline Analysis")
     st.markdown("*Track total occupancy patterns throughout the day*")
     
-    timeline_data = create_occupancy_timeline(data, selected_date)
+    # We must filter the timeline data by selected categories too
+    timeline_data_full = create_occupancy_timeline(data, selected_date)
     
-    if timeline_data is not None:
-        fig_timeline = px.line(
-            timeline_data,
-            x='hour',
-            y='occupancy',
-            color='building_category',
-            title=f"Total Hourly Occupancy Pattern on {selected_date}",
-            labels={'hour': 'Hour of Day', 'occupancy': 'Total Unique Users'},
-            height=400
-        )
-        
-        # Add vertical line for selected hour
-        fig_timeline.add_vline(
-            x=selected_hour,
-            line_dash="dash",
-            line_color=category_colors.get('Residential', '#d62728'),
-            annotation_text=f"Selected Hour: {selected_hour}:00"
-        )
-        st.plotly_chart(fig_timeline, width='stretch')
-        # --- Campus-wide 10-minute unique-user time series and simple smoothing ---
-        ts_10min = create_campus_timeseries(data, interval_minutes=10)
-        if ts_10min is not None and not ts_10min.empty:
-            ts = ts_10min.copy()
-            ts = ts.sort_values('time_bin')
-            # Add a rolling mean for smoothing (smoothing_bins * 10 minutes)
-            ts['smoothed'] = ts['unique_users'].rolling(window=smoothing_bins, min_periods=1, center=True).mean()
-            smoothing_minutes = smoothing_bins * 10
+    if timeline_data_full is not None:
+        timeline_data_filtered = timeline_data_full[
+            timeline_data_full['building_category'].isin(selected_categories)
+        ]
 
-            fig_ts = go.Figure()
-            raw_color = '#666666'
-            smoothed_color = category_colors.get('Residential', '#d62728')
-            fig_ts.add_trace(go.Scatter(
-                x=ts['time_bin'],
-                y=ts['unique_users'],
-                mode='lines',
-                name='Unique users (10-min bins)',
-                line=dict(color=raw_color, width=1),
-                hovertemplate='%{x}<br>Unique users: %{y}<extra></extra>'
-            ))
-            fig_ts.add_trace(go.Scatter(
-                x=ts['time_bin'],
-                y=ts['smoothed'],
-                mode='lines',
-                name=f'Smoothed (rolling {smoothing_minutes} min)',
-                line=dict(color=smoothed_color, width=2)
-            ))
-
-            fig_ts.update_layout(
-                title=f'Campus-wide Unique Users — 10-minute bins on {selected_date}',
-                xaxis_title='Time',
-                yaxis_title='Unique Users',
-                height=350,
-                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+        if not timeline_data_filtered.empty:
+            # --- FIX 4: Re-added color='building_category' ---
+            fig_timeline = px.line(
+                timeline_data_filtered, # Use the filtered data directly
+                x='time_bin',
+                y='occupancy',
+                color='building_category', # This brings back the separate lines
+                color_discrete_map={ # Match the bar chart/map
+                    'Residential': '#e34a33',
+                    'Non-Residential': '#2b8cbe',
+                    'Unknown': '#969696'
+                },
+                title=f"Hourly Occupancy Pattern on {selected_date} (Filtered)",
+                labels={'time_bin': 'Time', 'occupancy': 'Total Unique Users'},
+                height=400
+            )
+            
+            fig_timeline.add_shape(
+                type='line',
+                x0=selected_timestamp,
+                x1=selected_timestamp,
+                y0=0,
+                y1=1,
+                yref='paper',
+                line=dict(color='red', dash='dash')
             )
 
-            st.markdown("#### Campus-wide 10-minute Unique Users")
-            st.plotly_chart(fig_ts, use_container_width=True)
+            fig_timeline.add_annotation(
+                x=selected_timestamp, y=1.05, yref='paper',
+                text=f"Selected: {time_display}", showarrow=False, font=dict(color="red")
+            )
+            st.plotly_chart(fig_timeline, width='stretch')
+        else:
+            st.info("No timeline data for the selected categories.")
+    else:
+        st.warning(f"No timeline data available for {selected_date}.")
 
     # --- Raw Data View ---
     if st.checkbox("Show Raw Aggregated Data (for this time)"):
         st.subheader(f"Data for {time_display} on {selected_date}")
-        st.dataframe(heatmap_data)
+        st.dataframe(gdf)
 
 
 if __name__ == "__main__":
